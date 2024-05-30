@@ -1,0 +1,5 @@
+bittensor==6.12.2
+fastapi
+loguru
+numpy
+torch
