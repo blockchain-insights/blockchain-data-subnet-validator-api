@@ -20,8 +20,11 @@
 import bittensor as bt
 from typing import List, Optional, Union, Any, Dict
 
+from protocols.llm_engine import LLM_MESSAGE_TYPE_USER
+
+import protocol
+from protocol import LlmQuery, LlmMessage
 from api import SubnetsAPI
-from protocol import LlmQuery, LlmMessage, LLM_MESSAGE_TYPE_USER
 
 
 class TextQueryAPI(SubnetsAPI):
@@ -29,9 +32,6 @@ class TextQueryAPI(SubnetsAPI):
         super().__init__(wallet)
         self.netuid = 15
         self.name = "LlmQuery"
-
-        #TODO: run wallet here, and start syncing metagraph from time to time
-
 
     def prepare_synapse(self, network:str, text: str) -> LlmQuery:
         synapse = LlmQuery(

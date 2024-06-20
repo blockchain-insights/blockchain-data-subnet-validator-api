@@ -1,5 +1,7 @@
-bittensor==6.12.2
+bittensor==7.1.1
 fastapi
 loguru
 numpy
 torch
+python-dotenv
+blockchain-data-subnet-shared-libs==0.0.12

@@ -2,7 +2,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 from typing import List
-from insights.protocol import QueryOutput
+from protocol import QueryOutput
 
 
 class ChatMessageRequest(BaseModel):

@@ -17,10 +17,12 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-import torch
+import numpy as np
 import random
 import bittensor as bt
-from loguru import logger
+
+from protocol import HealthCheck
+from setup_logger import logger
 
 
 async def ping_uids(dendrite, metagraph, uids, timeout=3):
@@ -42,9 +44,9 @@ async def ping_uids(dendrite, metagraph, uids, timeout=3):
     try:
         responses = await dendrite(
             axons,
-            bt.Synapse(),  # TODO: potentially get the synapses available back?
+            HealthCheck(),
             deserialize=False,
-            timeout=timeout,
+            timeout=3,
         )
         successful_uids = [
             uid
@@ -60,8 +62,8 @@ async def ping_uids(dendrite, metagraph, uids, timeout=3):
         logger.error(f"Dendrite ping failed: {e}")
         successful_uids = []
         failed_uids = uids
-    logger.debug("ping() successful uids:", successful_uids)
-    logger.debug("ping() failed uids    :", failed_uids)
+    logger.debug("ping() successful uids:", successful_uids = successful_uids)
+    logger.debug("ping() failed uids    :", failed_uids = failed_uids)
     return successful_uids, failed_uids
 
 
@@ -86,7 +88,7 @@ async def get_query_api_nodes(dendrite, metagraph, n=0.1, timeout=3):
         for uid in metagraph.uids
         if metagraph.validator_trust[uid] > 0
     ]
-    top_uids = torch.where(metagraph.S > torch.quantile(metagraph.S, 1 - n))
+    top_uids = np.where(metagraph.S > np.quantile(metagraph.S, 1 - n))
     top_uids = top_uids[0].tolist()
     init_query_uids = set(top_uids).intersection(set(vtrust_uids))
     query_uids, _ = await ping_uids(

@@ -1,28 +1,81 @@
+import os
 import random
 import asyncio
-import numpy as np
+import json
 from datetime import datetime
-import torch
+import traceback
+import bittensor as bt
+import yaml
 
+import numpy as np
+from typing import List, Dict, Tuple, Union, Any
+from protocols.chat import ChatMessageRequest, ChatMessageResponse, ChatMessageVariantRequest, ContentType
 from fastapi.middleware.cors import CORSMiddleware
-from insights.api.query import TextQueryAPI
-from insights.api.get_query_axons import get_query_api_axons
-from insights.api.schema.chat import ChatMessageRequest, ChatMessageResponse, ChatMessageVariantRequest
-from loguru import logger
-from neurons.validators.utils.uids import get_top_miner_uids
+from starlette.requests import Request
+import time
+
+from starlette.status import HTTP_403_FORBIDDEN
+
+from api.query import TextQueryAPI
+from api.rate_limiter import rate_limit_middleware
+from utils.uids import get_top_miner_uids
 from fastapi import FastAPI, Body, HTTPException
 import uvicorn
-
+from setup_logger import logger
+from utils.config import check_config, add_args, config
+import argparse
+from utils.misc import ttl_metagraph
 
 class APIServer:
+
+    @classmethod
+    def check_config(cls, config: "bt.Config"):
+        check_config(cls, config)
+
+    @classmethod
+    def add_args(cls, parser):
+        add_args(cls, parser)
+
+    @classmethod
+    def config(cls):
+        return config(cls)
+
     failed_prompt_msg = "Please try again. Can't receive any responses from the miners or due to the poor network connection."
 
+    @staticmethod
+    def get_config():
+        parser = argparse.ArgumentParser()
+
+        parser.add_argument("--netuid", type=int, default=15, help="The chain subnet uid.")
+        parser.add_argument("--dev", action=argparse.BooleanOptionalAction)
+        
+        parser.add_argument("--api_port", type=int, default=8001, help="API endpoint port.")
+        parser.add_argument("--timeout", type=int, default=360, help="Timeout.")
+        parser.add_argument("--top_rate", type=float, default=0.80, help="Best selection percentage")
+
+        bt.subtensor.add_args(parser)
+        bt.logging.add_args(parser)
+        bt.wallet.add_args(parser)
+
+        config = bt.config(parser)
+        dev = config.dev
+        if dev:
+            dev_config_path = "validator.yml"
+            if os.path.exists(dev_config_path):
+                with open(dev_config_path, 'r') as f:
+                    dev_config = yaml.safe_load(f.read())
+                config.update(dev_config)
+            else:
+                with open(dev_config_path, 'w') as f:
+                    yaml.safe_dump(config, f)
+        return config
+    
+    @property
+    def metagraph(self):
+        return ttl_metagraph(self)
+    
     def __init__(
             self,
-            config: None,
-            wallet: None,
-            subtensor: None,
-            metagraph: None,
         ):
         """
         API can be invoked while running a validator.
@@ -39,51 +92,66 @@ class APIServer:
             allow_headers=["*"],
         )
 
-        self.config = config
+        base_config = APIServer.get_config()
+        self.config = self.config()
+        self.config.merge(base_config)
+        self.check_config(self.config)
+        
         self.device = self.config.neuron.device
-        self.wallet = wallet
+        self.wallet = bt.wallet(config=self.config)
         self.text_query_api = TextQueryAPI(wallet=self.wallet)
-        self.subtensor = subtensor
-        self.metagraph = metagraph
+        self.subtensor = bt.subtensor(config=self.config)
+        # self.metagraph = self.subtensor.metagraph(self.config.netuid)
         self.excluded_uids = []
 
+        self.api_key_file_path = "api_key.json"
+        self.api_keys = None
+        self.rate_limit_config = {"requests": 1}
+        if os.path.exists(self.api_key_file_path):
+            with open(self.api_key_file_path, "r") as file:
+                self.api_keys = json.load(file)
 
-        @self.app.post("/api/text_query", summary="POST /natural language query", tags=["validator api"])
-        async def get_response(query: ChatMessageRequest = Body(...)):
-            """
-            Generate a response to user query
+        self.config_file_path = "rate_limit.json"
+        if os.path.exists(self.config_file_path):
+            with open(self.config_file_path, "r") as file:
+                config = json.load(file)
+                self.rate_limit_config = config.get("rate_limit", {"requests": 1})
 
-            This endpoint allows miners convert the natural language query from the user into a Cypher query, and then provide a concise response in natural language.
-            
-            **Parameters:**
-            `query` (ChatMessageRequest): natural language query from users, network(Bitcoin, Ethereum, ...), User ID.
-                network: str
-                user_id: UUID
-                prompt: str
+        if self.api_keys:
+            self.app.middleware("http")(self.rate_limit_middleware_factory(self.rate_limit_config["requests"]))
 
-            **Returns:**
-            `ChatMessageResponse`: response in natural language.
-                - `miner_id` (str): responded miner uid
-                - `response` (json): miner response containing the following types of information:
-                1. Text information in natural language
-                2. Graph information for funds flow model-based response
-                3. Tabular information for transaction and account balance model-based response
-            
-            **Example Request:**
-            ```json
-            POST /text-query
-            {
-                "network": "Bitcoin",
-                "user_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-                "message_content": "Show me 15 transactions I sent after block height 800000. My address is bc1q4s8yps9my6hun2tpd5ke5xmvgdnxcm2qspnp9r"
-            }
-            ```
-            """
-            # select top miner            
-            top_miner_uids = get_top_miner_uids(self.metagraph, self.config.top_rate, self.excluded_uids)
+        @self.app.middleware("http")
+        async def log_requests(request: Request, call_next):
+            start_time = time.time()
+            response = await call_next(request)
+            end_time = time.time()
+            duration = end_time - start_time
+            logger.info(f"Request completed: {request.method} {request.url} in {duration:.4f} seconds")
+            return response
+
+        @self.app.post("/v1/api/text_query", summary="Processes chat message requests and returns a response from a randomly selected miner", tags=["v1"])
+        async def get_response(request: Request, query: ChatMessageRequest = Body(..., example={
+            "network": "bitcoin",
+            "prompt": "Return 3 transactions outgoing from my address bc1q4s8yps9my6hun2tpd5ke5xmvgdnxcm2qspnp9r"
+        })) -> ChatMessageResponse:
+            if self.api_keys:
+                api_key_validator = self.get_api_key_validator()
+                await api_key_validator(request)
+
+            top_miner_uids = await get_top_miner_uids(metagraph=self.metagraph, wallet=self.wallet, top_rate=self.config.top_rate)
             logger.info(f"Top miner UIDs are {top_miner_uids}")
-            top_miner_axons = await get_query_api_axons(wallet=self.wallet, metagraph=self.metagraph, uids=top_miner_uids)
+
+            selected_miner_uids = None
+            if len(top_miner_uids) >= 3:
+                selected_miner_uids = random.sample(top_miner_uids, 3)
+            else:
+                selected_miner_uids = top_miner_uids
+            top_miner_axons = [self.metagraph.axons[uid] for uid in selected_miner_uids]
+
             logger.info(f"Top miner axons: {top_miner_axons}")
+
+            if not top_miner_axons:
+                raise HTTPException(status_code=503, detail=self.failed_prompt_msg)
 
             # get miner response
             responses, blacklist_axon_ids = await self.text_query_api(
@@ -93,94 +161,85 @@ class APIServer:
                 timeout=self.config.timeout
             )
 
-            blacklist_axons = np.array(top_miner_axons)[blacklist_axon_ids]
-            blacklist_uids = np.where(np.isin(np.array(self.metagraph.axons), blacklist_axons))[0]
-            # get responded miner uids among top miners
-            responded_uids = np.setdiff1d(np.array(top_miner_uids), blacklist_uids)
-            self.excluded_uids = np.union1d(np.array(self.excluded_uids), blacklist_uids)
-            self.excluded_uids = self.excluded_uids.astype(int).tolist()
-            logger.info(f"Excluded_uids are {self.excluded_uids}")
-
             if not responses:
                 raise HTTPException(status_code=503, detail=self.failed_prompt_msg)
 
-            # If the number of excluded_uids is bigger than top x percentage of the whole axons, format it.
-            if len(self.excluded_uids) > int(self.metagraph.n * self.config.top_rate):
-                logger.info(f"Excluded UID list is too long")
-                self.excluded_uids = []            
-            logger.info(f"Excluded_uids are {self.excluded_uids}")
+            blacklist_axons = np.array(top_miner_axons)[blacklist_axon_ids]
+            blacklist_uids = np.where(np.isin(np.array(self.metagraph.axons), blacklist_axons))[0]
+            responded_uids = np.setdiff1d(np.array(top_miner_uids), blacklist_uids)
 
             logger.info(f"Responses are {responses}")
             
             selected_index = responses.index(random.choice(responses))
             response_object = ChatMessageResponse(
-                miner_id=self.metagraph.hotkeys[responded_uids[selected_index]],
+                miner_hotkey=self.metagraph.axons[responded_uids[selected_index]].hotkey,
                 response=responses[selected_index]
             )
 
             # return response and the hotkey of randomly selected miner
             return response_object
 
-        @self.app.post("/api/text_query/variant", summary="POST /variation request for natual language query", tags=["validator api"])
-        async def get_response_variant(query: ChatMessageVariantRequest = Body(...)):
-            """            
-            A validator would be able to receive a user request to generate a variation on a previously generated message. It will return the new message and store the fact that a specific miner's message had a variation request.
-            - Receive temperature. The temperature will determine the creativity of the response.
-            - Return generated variation text and miner ID.
+        @self.app.post("/v1/api/text_query/variant", summary="Processes variant chat message requests and returns a response from a specific miner", tags=["v1"])
+        async def get_response_variant(request: Request, query: ChatMessageVariantRequest = Body(..., example={
+            "network": "bitcoin",
+            "prompt": "Return 3 transactions outgoing from my address bc1q4s8yps9my6hun2tpd5ke5xmvgdnxcm2qspnp9r",
+            "miner_hotkey": "5EExDvawjGyszzxF8ygvNqkM1w5M4hA82ydBjhx4cY2ut2yr"
+        })) -> ChatMessageResponse:
+            if self.api_keys:
+                api_key_validator = self.get_api_key_validator()
+                await api_key_validator(request)
 
-            
-            **Parameters:**
-            `query` (ChatMessageVariantRequest): natural language query from users, network(Bitcoin, Ethereum, ...), User ID, Miner UID, temperature.\
-                user_id: UUID
-                prompt: str
-                temperature: float
-                miner_id: str
-            **Returns:**
-            `ChatMessageResponse`: response in natural language.
-                - `miner_id` (str): responded miner uid
-                - `response` (json): miner response containing the following types of information:
-                1. Text information in natural language
-                2. Graph information for funds flow model-based response
-                3. Tabular information for transaction and account balance model-based response
-            
-            **Example Request:**
-            ```json
-            POST /text-query
-            {
-                "network": "Bitcoin",
-                "user_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-                "message_content": "Show me 15 transactions I sent after block height 800000. My address is bc1q4s8yps9my6hun2tpd5ke5xmvgdnxcm2qspnp9r",
-                "temperature": "0.1",
-                miner_id: "230",
-            }
-            ```
-            """
-            logger.info(f"Miner {query.miner_id} received a variant request.")
-            
-            miner_axon = await get_query_api_axons(wallet=self.wallet, metagraph=self.metagraph, uids=query.miner_id)
+            logger.info(f"Miner {query.miner_hotkey} received a variant request.")
+
+            try:
+                miner_id = self.metagraph.hotkeys.index(query.miner_hotkey)
+            except ValueError:
+                raise HTTPException(status_code=404, detail="Miner hotkey not found")
+
+            miner_axon = [self.metagraph.axons[uid] for uid in [miner_id]]
             logger.info(f"Miner axon: {miner_axon}")
-            
+
             responses, _ = await self.text_query_api(
                 axons=miner_axon,
                 network=query.network,
                 text=query.prompt,
                 timeout=self.config.timeout
             )
-            
+
             if not responses:
                 raise HTTPException(status_code=503, detail=self.failed_prompt_msg)
-            
+
+            # TODO: we store the responded UIDs to progres here and that data will be take later in scoring function
+            # To be considered if that creates fair result, what i someone has a valdiator and will be prompting his own miner to get better score?
+            # well, he wil pay for openai usage, so he will be paying for the score, so it is fair?
+
             logger.info(f"Variant: {responses}")
             response_object = ChatMessageResponse(
-                miner_id=query.miner_id,
-                response=[responses[0]]
+                miner_hotkey=query.miner_hotkey,
+                response=responses[0]
             )
 
             return response_object
 
         @self.app.get("/", tags=["default"])
         def healthcheck():
-            return datetime.utcnow()  
+            return {
+                "status": "ok",
+                "timestamp": datetime.utcnow()
+            }
+
+    def rate_limit_middleware_factory(self, max_requests):
+        async def middleware(request: Request, call_next):
+            return await rate_limit_middleware(request, call_next, max_requests)
+        return middleware
+
+    def get_api_key_validator(self):
+        async def validator(request: Request):
+            if self.api_keys:
+                api_key = request.headers.get("x-api-key")
+                if not api_key or not any(api_key in keys for keys in self.api_keys):
+                    raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="Forbidden")
+        return validator
         
     def start(self):
         # Set the default event loop policy to avoid conflicts with uvloop
