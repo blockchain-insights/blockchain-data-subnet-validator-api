@@ -8,7 +8,7 @@ import bittensor as bt
 import yaml
 
 import numpy as np
-from typing import List, Dict, Tuple, Union, Any
+from typing import List, Dict, Tuple, Union, Any, Optional
 from protocols.chat import ChatMessageRequest, ChatMessageResponse, ChatMessageVariantRequest, ContentType
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
@@ -19,7 +19,7 @@ from starlette.status import HTTP_403_FORBIDDEN
 from api.query import TextQueryAPI
 from api.rate_limiter import rate_limit_middleware
 from utils.uids import get_top_miner_uids
-from fastapi import FastAPI, Body, HTTPException
+from fastapi import FastAPI, Body, HTTPException, Header
 import uvicorn
 from setup_logger import logger
 from utils.config import check_config, add_args, config
@@ -133,7 +133,27 @@ class APIServer:
         async def get_response(request: Request, query: ChatMessageRequest = Body(..., example={
             "network": "bitcoin",
             "prompt": "Return 3 transactions outgoing from my address bc1q4s8yps9my6hun2tpd5ke5xmvgdnxcm2qspnp9r"
-        })) -> ChatMessageResponse:
+        }), x_api_key: Optional[str] = Header(None)) -> ChatMessageResponse:
+            """
+            #### Summary
+            Processes chat message requests and returns a response from a randomly selected miner.
+
+            #### Parameters
+
+            - **query**:
+              - The body of the request.
+              - Example:
+                ```json
+                {
+                  "network": "bitcoin",
+                  "prompt": "Return 3 transactions outgoing from my address bc1q4s8yps9my6hun2tpd5ke5xmvgdnxcm2qspnp9r"
+                }
+                ```
+
+            - **x-api-key**: `str`
+              - An API key provided in the header - it might be optional according to validator configuration.
+
+            """
             if self.api_keys:
                 api_key_validator = self.get_api_key_validator()
                 await api_key_validator(request)
@@ -184,7 +204,28 @@ class APIServer:
             "network": "bitcoin",
             "prompt": "Return 3 transactions outgoing from my address bc1q4s8yps9my6hun2tpd5ke5xmvgdnxcm2qspnp9r",
             "miner_hotkey": "5CaLZzxPezFmy2hpxVr88x1b62UT6Bmtf97ohF9XKJroURoe"
-        })) -> ChatMessageResponse:
+        }), x_api_key: Optional[str] = Header(None)) -> ChatMessageResponse:
+            """
+            #### Summary
+            Processes variant chat message requests and returns a response from a specific miner.
+
+            #### Parameters
+
+            - **query**:
+              - The body of the request.
+              - Example:
+                ```json
+                {
+                  "network": "bitcoin",
+                  "prompt": "Return 3 transactions outgoing from my address bc1q4s8yps9my6hun2tpd5ke5xmvgdnxcm2qspnp9r",
+                  "miner_hotkey": "5CaLZzxPezFmy2hpxVr88x1b62UT6Bmtf97ohF9XKJroURoe"
+                }
+                ```
+
+-           **x-api-key**: `str`
+              - An API key provided in the header - it might be optional according to validator configuration.
+
+            """
             if self.api_keys:
                 api_key_validator = self.get_api_key_validator()
                 await api_key_validator(request)
