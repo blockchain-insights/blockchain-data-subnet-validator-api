@@ -60,7 +60,7 @@ class APIServer:
         config = bt.config(parser)
         dev = config.dev
         if dev:
-            dev_config_path = "validator.yml"
+            dev_config_path = "validator-api.yml"
             if os.path.exists(dev_config_path):
                 with open(dev_config_path, 'r') as f:
                     dev_config = yaml.safe_load(f.read())
