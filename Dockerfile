@@ -5,3 +5,4 @@ WORKDIR /app
 
 EXPOSE 10000
 RUN pip install -r requirements.txt
+RUN chmod +rwx scripts/*
