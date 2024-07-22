@@ -20,6 +20,7 @@ import os
 import numpy as np
 import argparse
 import bittensor as bt
+import json
 from loguru import logger
 
 
@@ -245,4 +246,5 @@ def config(cls):
     bt.logging.add_args(parser)
     bt.axon.add_args(parser)
     cls.add_args(parser)
+
     return bt.config(parser)
