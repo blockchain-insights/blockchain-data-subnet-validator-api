@@ -4,4 +4,4 @@ loguru
 numpy
 torch
 python-dotenv
-blockchain-data-subnet-shared-libs==0.0.12
+blockchain-data-subnet-shared-libs==0.0.20
