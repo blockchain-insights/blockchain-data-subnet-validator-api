@@ -79,7 +79,7 @@ async def get_top_miner_uids(metagraph: "bt.metagraph.Metagraph",
         top_miner_uids = np.array([uid for uid, _ in sorted_values[:top_rate_num_items]])
         return top_miner_uids
     except Exception as e:
-        logger.error(f"Failed to get top miner uids: {e}")
+        logger.error(f"Failed to get top miner uids", error = {'exception_type': e.__class__.__name__,'exception_message': str(e),'exception_args': e.args})
         return None
     finally:
         dendrite.close_session()

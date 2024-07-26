@@ -1,7 +1,10 @@
 bittensor==7.1.1
+scikit-learn>=0.24
 fastapi
+sqlalchemy
+psycopg2-binary
 loguru
 numpy
 torch
 python-dotenv
-blockchain-data-subnet-shared-libs==0.0.20
+blockchain-data-subnet-shared-libs==0.0.21

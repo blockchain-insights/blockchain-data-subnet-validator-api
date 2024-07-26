@@ -92,7 +92,7 @@ def _ttl_hash_gen(seconds: int):
 
 
 # 12 seconds updating block.
-@ttl_cache(maxsize=1, ttl=12)
+@ttl_cache(maxsize=1, ttl=1200)
 def ttl_metagraph(self):
     logger.info('resync metagraph')
     metagraph = self.subtensor.metagraph(self.config.netuid)

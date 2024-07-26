@@ -51,7 +51,6 @@ class TextQueryAPI(SubnetsAPI):
         outputs = []
         blacklist_axon_list = []
         for id, response in enumerate(responses):
-            print(response)
             if response.dendrite.status_code != 200:
                 blacklist_axon_list.append(id)
                 continue

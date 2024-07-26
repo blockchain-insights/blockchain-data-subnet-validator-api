@@ -2,10 +2,11 @@ import os
 import random
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import traceback
 import bittensor as bt
 import yaml
+import requests
 
 import numpy as np
 from typing import List, Dict, Tuple, Union, Any, Optional
@@ -25,6 +26,18 @@ from setup_logger import logger
 from utils.config import check_config, add_args, config
 import argparse
 from utils.misc import ttl_metagraph
+from utils.receipt import ReceiptManager
+from pydantic import BaseModel, Field
+import os
+
+from utils.sign import sign_message
+
+class PromptHistoryRequest(BaseModel):
+    miner_hotkeys: list[str] = Field(default=[], title="Miner hotkeys")
+    query_start_times: list[str] = Field(default=[], title="Query started time")
+    execution_times: list[float] = Field(default=[], title="Query execution time")
+    prompt: str = Field(default = "", title="executed prompt")
+    token_usages: list[dict] = Field(default=[], title="Token count")
 
 class APIServer:
 
@@ -48,10 +61,12 @@ class APIServer:
 
         parser.add_argument("--netuid", type=int, default=15, help="The chain subnet uid.")
         parser.add_argument("--dev", action=argparse.BooleanOptionalAction)
-        
+
         parser.add_argument("--api_port", type=int, default=8001, help="API endpoint port.")
         parser.add_argument("--timeout", type=int, default=360, help="Timeout.")
         parser.add_argument("--top_rate", type=float, default=0.80, help="Best selection percentage")
+        parser.add_argument("--token_count_diff_threshold", type=int, default=30, help="Number of tokens that can be allowed as a difference between miners")
+
 
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
@@ -94,11 +109,11 @@ class APIServer:
         logger.info('config', config = config_out)
 
         return config
-    
+
     @property
     def metagraph(self):
         return ttl_metagraph(self)
-    
+
     def __init__(
             self,
         ):
@@ -121,13 +136,18 @@ class APIServer:
         self.config = self.config()
         self.config.merge(base_config)
         self.check_config(self.config)
-        
+        self.receipt_manager = ReceiptManager(db_url=os.getenv('DB_CONNECTION_STRING','postgresql://postgres:changeit456$@localhost:5433/validator'))
+
         self.device = self.config.neuron.device
         self.wallet = bt.wallet(config=self.config)
         self.text_query_api = TextQueryAPI(wallet=self.wallet)
         self.subtensor = bt.subtensor(config=self.config)
         # self.metagraph = self.subtensor.metagraph(self.config.netuid)
         self.excluded_uids = []
+
+        self.keypair = (
+            self.wallet.hotkey if isinstance(self.wallet, bt.wallet) else self.wallet
+        ) or bt.wallet().hotkey
 
         self.api_key_file_path = "api_key.json"
         self.api_keys = None
@@ -151,7 +171,7 @@ class APIServer:
             response = await call_next(request)
             end_time = time.time()
             duration = end_time - start_time
-            logger.info(f"Request completed: {request.method} {request.url} in {duration:.4f} seconds")
+            logger.info(f"Request completed", request_method = request.method, url = request.url, duration = f"{duration:.4f}")
             return response
 
         @self.app.post("/v1/api/text_query", summary="Processes chat message requests and returns a response from a randomly selected miner", tags=["v1"])
@@ -183,17 +203,17 @@ class APIServer:
                 api_key_validator = self.get_api_key_validator()
                 await api_key_validator(request)
 
-            top_miner_uids = await get_top_miner_uids(metagraph=self.metagraph, wallet=self.wallet, top_rate=self.config.top_rate)
-            logger.info(f"Top miner UIDs are {top_miner_uids}")
+            top_miner_uids = await get_top_miner_uids(metagraph=self.metagraph, wallet=self.wallet)
+            logger.info(f"Top miner UIDs", top_miner_uids = top_miner_uids)
 
             selected_miner_uids = None
-            if len(top_miner_uids) >= 3:
-                selected_miner_uids = random.sample(top_miner_uids, 3)
+            if len(top_miner_uids) >= 7:
+                selected_miner_uids = random.sample(top_miner_uids, 7)
             else:
                 selected_miner_uids = top_miner_uids
             top_miner_axons = [self.metagraph.axons[uid] for uid in selected_miner_uids]
 
-            logger.info(f"Top miner axons: {top_miner_axons}")
+            logger.info(f"Top miner axons", top_miner_axons = top_miner_axons)
 
             if not top_miner_axons:
                 raise HTTPException(status_code=503, detail=self.failed_prompt_msg)
@@ -213,16 +233,26 @@ class APIServer:
             blacklist_uids = np.where(np.isin(np.array(self.metagraph.axons), blacklist_axons))[0]
             responded_uids = np.setdiff1d(np.array(top_miner_uids), blacklist_uids)
 
-            logger.info(f"Responses are {responses}")
-            
+            logger.info(f"Responses", responses = responses)
+
+            prompt_entry = PromptHistoryRequest(
+                miner_hotkeys=[response['query_output'][0]['miner_hotkey'] for response in responses],
+                query_start_times=[response['query_start_time'] for response in responses],
+                execution_times=[response['execution_time'] for response in responses],
+                prompt=query.prompt,
+                token_usages=[response['token_usage'] for response in responses])
+
+            self.receipt_manager.add_prompt_history(self.wallet.hotkey.ss58_address, prompt_entry)
+
             selected_index = responses.index(random.choice(responses))
             response_object = ChatMessageResponse(
                 miner_hotkey=self.metagraph.axons[responded_uids[selected_index]].hotkey,
-                response=responses[selected_index]
+                response=responses[selected_index]['query_output']
             )
 
             # return response and the hotkey of randomly selected miner
             return response_object
+
 
         @self.app.post("/v1/api/text_query/variant", summary="Processes variant chat message requests and returns a response from a specific miner", tags=["v1"])
         async def get_response_variant(request: Request, query: ChatMessageVariantRequest = Body(..., example={
@@ -255,7 +285,7 @@ class APIServer:
                 api_key_validator = self.get_api_key_validator()
                 await api_key_validator(request)
 
-            logger.info(f"Miner {query.miner_hotkey} received a variant request.")
+            logger.info(f"Miner received a variant request.", miner_hotkey = query.miner_hotkey)
 
             try:
                 miner_id = self.metagraph.hotkeys.index(query.miner_hotkey)
@@ -263,7 +293,7 @@ class APIServer:
                 raise HTTPException(status_code=404, detail="Miner hotkey not found")
 
             miner_axon = [self.metagraph.axons[uid] for uid in [miner_id]]
-            logger.info(f"Miner axon: {miner_axon}")
+            logger.info(f"Miner axon", miner_axon = miner_axon)
 
             responses, _ = await self.text_query_api(
                 axons=miner_axon,
@@ -271,19 +301,16 @@ class APIServer:
                 text=query.prompt,
                 timeout=self.config.timeout
             )
+            logger.info(f"Variant", responses = responses)
 
             if not responses:
                 raise HTTPException(status_code=503, detail=self.failed_prompt_msg)
 
-            # TODO: we store the responded UIDs to progres here and that data will be take later in scoring function
-            # To be considered if that creates fair result, what i someone has a valdiator and will be prompting his own miner to get better score?
-            # well, he wil pay for openai usage, so he will be paying for the score, so it is fair?
-
-            logger.info(f"Variant: {responses}")
             response_object = ChatMessageResponse(
                 miner_hotkey=query.miner_hotkey,
-                response=responses[0]
+                response=responses[0]['query_output']
             )
+            logger.info(f'Token usage', token_usage = responses[0]["token_usage"])
 
             return response_object
 
@@ -294,7 +321,8 @@ class APIServer:
                 "timestamp": datetime.utcnow()
             }
 
-    def rate_limit_middleware_factory(self, max_requests):
+    @staticmethod
+    def rate_limit_middleware_factory(max_requests):
         async def middleware(request: Request, call_next):
             return await rate_limit_middleware(request, call_next, max_requests)
         return middleware
@@ -306,10 +334,9 @@ class APIServer:
                 if not api_key or not any(api_key in keys for keys in self.api_keys):
                     raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="Forbidden")
         return validator
-        
+
     def start(self):
         # Set the default event loop policy to avoid conflicts with uvloop
         asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
         # Start the Uvicorn server with your app
-        uvicorn.run(self.app, host="0.0.0.0", port=int(self.config.api_port), loop="asyncio")
-        
+        uvicorn.run(self.app, host="0.0.0.0", port=int(self.config.api_port), loop="asyncio", workers=int(os.getenv('WORKER_COUNT', 1)))
