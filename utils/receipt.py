@@ -51,8 +51,8 @@ class ReceiptManager:
                 inspector = inspect(conn)
                 tables = inspector.get_table_names()
                 if 'receipts' not in tables or 'miner_blacklist' not in tables:
-                    raise OperationalError("Required tables are missing in the database.")
-        except OperationalError as e:
+                    raise Exception("Required tables are missing in the database.")
+        except Exception as e:
             logger.error(f"Database verification failed: {e}")
             raise
 
