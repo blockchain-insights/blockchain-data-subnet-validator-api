@@ -46,7 +46,7 @@ async def ping_uids(dendrite, metagraph, uids, timeout=3):
             axons,
             HealthCheck(),
             deserialize=False,
-            timeout=3,
+            timeout=10,
         )
         successful_uids = [
             uid
