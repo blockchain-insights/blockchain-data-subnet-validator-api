@@ -2,6 +2,7 @@ import os
 import random
 import asyncio
 import json
+import signal
 from datetime import datetime, timedelta
 import traceback
 import bittensor as bt
@@ -142,8 +143,6 @@ class APIServer:
         self.wallet = bt.wallet(config=self.config)
         self.text_query_api = TextQueryAPI(wallet=self.wallet)
         self.subtensor = bt.subtensor(config=self.config)
-        # self.metagraph = self.subtensor.metagraph(self.config.netuid)
-        self.excluded_uids = []
 
         self.keypair = (
             self.wallet.hotkey if isinstance(self.wallet, bt.wallet) else self.wallet
@@ -206,7 +205,6 @@ class APIServer:
             top_miner_uids = await get_top_miner_uids(metagraph=self.metagraph, wallet=self.wallet)
             logger.info(f"Top miner UIDs", top_miner_uids = top_miner_uids)
 
-            selected_miner_uids = None
             if len(top_miner_uids) >= 7:
                 selected_miner_uids = random.sample(top_miner_uids, 7)
             else:
@@ -338,5 +336,18 @@ class APIServer:
     def start(self):
         # Set the default event loop policy to avoid conflicts with uvloop
         asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+
+        # Define a shutdown handler
+        def shutdown_handler(signal, frame):
+            logger.info("Shutting down gracefully...")
+            uvicorn_server.should_exit = True
+
+        # Register the shutdown handler for SIGINT and SIGTERM
+        signal.signal(signal.SIGINT, shutdown_handler)
+        signal.signal(signal.SIGTERM, shutdown_handler)
+
         # Start the Uvicorn server with your app
-        uvicorn.run(self.app, host="0.0.0.0", port=int(self.config.api_port), loop="asyncio", workers=int(os.getenv('WORKER_COUNT', 1)))
+        uvicorn_server = uvicorn.Server(
+            config=uvicorn.Config(self.app, host="0.0.0.0", port=int(self.config.api_port), loop="asyncio",
+                                  workers=int(os.getenv('WORKER_COUNT', 1))))
+        uvicorn_server.run()

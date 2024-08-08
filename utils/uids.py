@@ -5,7 +5,6 @@ from typing import List
 
 from loguru import logger
 
-import protocol
 from api.get_query_axons import ping_uids
 
 
@@ -40,7 +39,7 @@ def check_uid_availability(
 async def get_top_miner_uids(metagraph: "bt.metagraph.Metagraph",
                              wallet: "bt.wallet.Wallet",
                              top_rate: float = 1,
-                             vpermit_tao_limit: int = 4096) -> np.int64:
+                             vpermit_tao_limit: int = 4096) -> [np.int64]:
 
     """Returns the available top miner UID from the metagraph.
     Args:
@@ -52,8 +51,10 @@ async def get_top_miner_uids(metagraph: "bt.metagraph.Metagraph",
     Returns:
         top_miner_uid (np.int64): The top miner UID.
     """
+
+    dendrite = bt.dendrite(wallet=wallet)
+
     try:
-        dendrite = bt.dendrite(wallet=wallet)
         miner_candidate_uids = []
         for uid in range(metagraph.n.item()):
             uid_is_available = check_uid_availability(
@@ -83,51 +84,3 @@ async def get_top_miner_uids(metagraph: "bt.metagraph.Metagraph",
         return None
     finally:
         dendrite.close_session()
-
-
-def get_random_uids(
-    self, k: int, exclude: List[int] = None
-) -> np.int64:
-    """Returns k available random uids from the metagraph.
-    Args:
-        k (int): Number of uids to return.
-        exclude (List[int]): List of uids to exclude from the random sampling.
-    Returns:
-        uids (np.array): Randomly sampled available uids.
-    Notes:
-        If `k` is larger than the number of available `uids`, set `k` to the number of available `uids`.
-    """
-    candidate_uids = []
-    for uid in range(self.metagraph.n.item()):
-        uid_is_available = check_uid_availability(
-            self.metagraph, uid, self.config.neuron.vpermit_tao_limit
-        )
-        uid_is_not_excluded = exclude is None or uid not in exclude
-
-        if uid_is_available:
-            if uid_is_not_excluded:
-                candidate_uids.append(uid)
-
-    k = max(1, min(len(candidate_uids), k))
-    uids = np.array(random.sample(candidate_uids, k))
-    return uids
-
-def get_uids_batch(self, batch_size: int, exclude: List[int] = None):
-    candidate_uids = []
-    for uid in range(self.metagraph.n.item()):
-        uid_is_available = check_uid_availability(
-            self.metagraph, uid, self.config.neuron.vpermit_tao_limit
-        )
-        uid_is_not_excluded = exclude is None or uid not in exclude and uid != self.uid
-
-        if uid_is_available:
-            if uid_is_not_excluded:
-                candidate_uids.append(uid)
-
-    # Shuffle the list of available uids
-    random.shuffle(candidate_uids)
-    batch_size = max(1, min(len(candidate_uids), batch_size))
-
-    # Yield batches of uids
-    for i in range(0, len(candidate_uids), batch_size):
-        yield np.array(candidate_uids[i:i+batch_size])

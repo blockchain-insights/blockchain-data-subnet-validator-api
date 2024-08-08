@@ -96,5 +96,4 @@ def _ttl_hash_gen(seconds: int):
 def ttl_metagraph(self):
     logger.info('resync metagraph')
     metagraph = self.subtensor.metagraph(self.config.netuid)
-    metagraph.sync(subtensor=self.subtensor)
     return metagraph

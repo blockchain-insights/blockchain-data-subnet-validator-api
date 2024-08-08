@@ -42,12 +42,7 @@ async def ping_uids(dendrite, metagraph, uids, timeout=3):
     """
     axons = [metagraph.axons[uid] for uid in uids]
     try:
-        responses = await dendrite(
-            axons,
-            HealthCheck(),
-            deserialize=False,
-            timeout=10,
-        )
+        responses = await dendrite(axons,  HealthCheck(),  deserialize=False,  timeout=10 )
         successful_uids = [
             uid
             for uid, response in zip(uids, responses)
@@ -58,6 +53,11 @@ async def ping_uids(dendrite, metagraph, uids, timeout=3):
             for uid, response in zip(uids, responses)
             if response.dendrite.status_code != 200
         ]
+
+        for uid, response in zip(uids, responses):
+            if response.dendrite.status_code != 200:
+                logger.error(f"Dendrite ping failed {response} axon:{response.axon}  dendrite:{response.dendrite}")
+
     except Exception as e:
         logger.error(f"Dendrite ping failed", error = {'exception_type': e.__class__.__name__,'exception_message': str(e),'exception_args': e.args})
         successful_uids = []
