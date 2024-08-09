@@ -8,3 +8,6 @@ numpy
 torch
 python-dotenv
 blockchain-data-subnet-shared-libs==0.0.21
+redis
+aioredis
+pydantic-settings

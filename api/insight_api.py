@@ -1,14 +1,11 @@
-import os
 import random
 import asyncio
 import json
 import signal
 from datetime import datetime, timedelta
-import traceback
 import bittensor as bt
+import redis
 import yaml
-import requests
-
 import numpy as np
 from typing import List, Dict, Tuple, Union, Any, Optional
 from protocols.chat import ChatMessageRequest, ChatMessageResponse, ChatMessageVariantRequest, ContentType
@@ -19,7 +16,8 @@ import time
 from starlette.status import HTTP_403_FORBIDDEN
 
 from api.query import TextQueryAPI
-from api.rate_limiter import rate_limit_middleware
+from api.rate_limiter import RateLimiterMiddleware
+from utils.settings import ValidatorAPIConfig
 from utils.uids import get_top_miner_uids
 from fastapi import FastAPI, Body, HTTPException, Header
 import uvicorn
@@ -62,13 +60,6 @@ class APIServer:
 
         parser.add_argument("--netuid", type=int, default=15, help="The chain subnet uid.")
         parser.add_argument("--dev", action=argparse.BooleanOptionalAction)
-
-        parser.add_argument("--api_port", type=int, default=8001, help="API endpoint port.")
-        parser.add_argument("--timeout", type=int, default=360, help="Timeout.")
-        parser.add_argument("--top_rate", type=float, default=0.80, help="Best selection percentage")
-        parser.add_argument("--token_count_diff_threshold", type=int, default=30, help="Number of tokens that can be allowed as a difference between miners")
-
-
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -85,30 +76,6 @@ class APIServer:
                 with open(dev_config_path, 'w') as f:
                     yaml.safe_dump(config, f)
 
-        def _copy(newconfig, config, allow):
-            if isinstance(allow, str):
-                newconfig[allow] = config[allow]
-            elif isinstance(allow, tuple):
-                if len(allow) == 1:
-                    newconfig[allow[0]] = config[allow[0]]
-                else:
-                    if newconfig.get(allow[0]) == None:
-                        newconfig[allow[0]] = {}
-                    _copy(newconfig[allow[0]], config[allow[0]], allow[1:])
-
-        def filter(config, allowlist):
-            newconfig = {}
-            for item in allowlist:
-                _copy(newconfig, config, item)
-            return newconfig
-
-        whitelist_config_keys = {'api_port', 'timeout', 'top_rate', ('logging', 'logging_dir'), ('logging', 'record_log'), 'netuid',
-                                ('subtensor', 'chain_endpoint'), ('subtensor', 'network'), 'wallet'}
-
-        json_config = json.loads(json.dumps(config, indent = 2))
-        config_out = filter(json_config, whitelist_config_keys)
-        logger.info('config', config = config_out)
-
         return config
 
     @property
@@ -123,9 +90,11 @@ class APIServer:
         Receive config, wallet, subtensor, metagraph from the validator and share the score of miners with the validator.
         subtensor and metagraph of APIs will change as the ones of validators change.
         """
-        self.app = FastAPI(title="validator-api",
-                           description="The goal of validator-api is to set up how to message between Chat API and validators.")
+        self.app = FastAPI(title="validator-api",  description="The goal of validator-api is to set up how to message between Chat API and validators.")
+        self.validator_config = ValidatorAPIConfig()
 
+        max_requests = self.validator_config.RATE_LIMIT
+        self.app.add_middleware(RateLimiterMiddleware, redis_url=self.validator_config.REDIS_URL,  max_requests=max_requests, window_seconds=60)
         self.app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
@@ -137,7 +106,8 @@ class APIServer:
         self.config = self.config()
         self.config.merge(base_config)
         self.check_config(self.config)
-        self.receipt_manager = ReceiptManager(db_url=os.getenv('DB_CONNECTION_STRING','postgresql://postgres:changeit456$@localhost:5433/validator'))
+        self.receipt_manager = ReceiptManager(db_url=self.validator_config.DB_CONNECTION_STRING)
+        self.redis_client = redis.Redis.from_url(self.validator_config.REDIS_URL)
 
         self.device = self.config.neuron.device
         self.wallet = bt.wallet(config=self.config)
@@ -150,19 +120,10 @@ class APIServer:
 
         self.api_key_file_path = "api_key.json"
         self.api_keys = None
-        self.rate_limit_config = {"requests": 1}
+
         if os.path.exists(self.api_key_file_path):
             with open(self.api_key_file_path, "r") as file:
                 self.api_keys = json.load(file)
-
-        self.config_file_path = "rate_limit.json"
-        if os.path.exists(self.config_file_path):
-            with open(self.config_file_path, "r") as file:
-                config = json.load(file)
-                self.rate_limit_config = config.get("rate_limit", {"requests": 1})
-
-        if self.api_keys:
-            self.app.middleware("http")(self.rate_limit_middleware_factory(self.rate_limit_config["requests"]))
 
         @self.app.middleware("http")
         async def log_requests(request: Request, call_next):
@@ -170,7 +131,7 @@ class APIServer:
             response = await call_next(request)
             end_time = time.time()
             duration = end_time - start_time
-            logger.info(f"Request completed", request_method = request.method, url = request.url, duration = f"{duration:.4f}")
+            logger.info(f"Request completed", request_method=request.method, url=request.url, duration = f"{duration:.4f}")
             return response
 
         @self.app.post("/v1/api/text_query", summary="Processes chat message requests and returns a response from a randomly selected miner", tags=["v1"])
@@ -202,7 +163,11 @@ class APIServer:
                 api_key_validator = self.get_api_key_validator()
                 await api_key_validator(request)
 
-            top_miner_uids = await get_top_miner_uids(metagraph=self.metagraph, wallet=self.wallet)
+            blacklisted_keys = list(self.redis_client.scan_iter(match='blacklist_axon_id_*'))
+            blacklisted_values = self.redis_client.mget(blacklisted_keys)
+            blacklisted_axon_ids = [json.loads(value) for value in blacklisted_values if value is not None]
+
+            top_miner_uids = await get_top_miner_uids(metagraph=self.metagraph, blacklisted_axon_ids=blacklisted_axon_ids, top_rate=self.validator_config.TOP_RATE)
             logger.info(f"Top miner UIDs", top_miner_uids = top_miner_uids)
 
             if len(top_miner_uids) >= 7:
@@ -221,8 +186,13 @@ class APIServer:
                 axons=top_miner_axons,
                 network=query.network,
                 text=query.prompt,
-                timeout=self.config.timeout
+                timeout=self.validator_config.TIMEOUT
             )
+
+            pipeline = self.redis_client.pipeline()
+            for axon_id in blacklist_axon_ids:
+                pipeline.setex(f'blacklist_axon_id_{axon_id}', 120, json.dumps(axon_id))
+            pipeline.execute()
 
             if not responses:
                 raise HTTPException(status_code=503, detail=self.failed_prompt_msg)
@@ -297,9 +267,9 @@ class APIServer:
                 axons=miner_axon,
                 network=query.network,
                 text=query.prompt,
-                timeout=self.config.timeout
+                timeout=self.validator_config.TIMEOUT
             )
-            logger.info(f"Variant", responses = responses)
+            logger.info(f"Variant", responses=responses)
 
             if not responses:
                 raise HTTPException(status_code=503, detail=self.failed_prompt_msg)
@@ -319,11 +289,6 @@ class APIServer:
                 "timestamp": datetime.utcnow()
             }
 
-    @staticmethod
-    def rate_limit_middleware_factory(max_requests):
-        async def middleware(request: Request, call_next):
-            return await rate_limit_middleware(request, call_next, max_requests)
-        return middleware
 
     def get_api_key_validator(self):
         async def validator(request: Request):
@@ -339,8 +304,9 @@ class APIServer:
 
         # Define a shutdown handler
         def shutdown_handler(signal, frame):
-            logger.info("Shutting down gracefully...")
+            logger.info("Shutting down...")
             uvicorn_server.should_exit = True
+            uvicorn_server.force_exit = True
 
         # Register the shutdown handler for SIGINT and SIGTERM
         signal.signal(signal.SIGINT, shutdown_handler)
@@ -348,6 +314,6 @@ class APIServer:
 
         # Start the Uvicorn server with your app
         uvicorn_server = uvicorn.Server(
-            config=uvicorn.Config(self.app, host="0.0.0.0", port=int(self.config.api_port), loop="asyncio",
-                                  workers=int(os.getenv('WORKER_COUNT', 1))))
+            config=uvicorn.Config(self.app, host="0.0.0.0", port=int(self.validator_config.API_PORT), loop="asyncio",
+                                  workers=int(self.validator_config.WORKER_COUNT)))
         uvicorn_server.run()

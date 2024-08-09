@@ -5,11 +5,6 @@ if [ -f /app/config/api_key.json ]; then
   cp -f /app/config/api_key.json /app/api_key.json
 fi
 
-# Check if the rate_limit.json file exists and copy it with overwrite if it does
-if [ -f /app/config/rate_limit.json ]; then
-  cp -f /app/config/rate_limit.json /app/rate_limit.json
-fi
-
 cd "$(dirname "$0")/../"
 
 export PYTHONPATH=$PWD
